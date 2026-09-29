@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' https://api.opendota.com https://cdn.cloudflare.steamstatic.com data:">
+  <style>
+    body {
+      margin: 0;
+      background: transparent;
+      font-family: Segoe UI, sans-serif;
+      color: #fff;
+    }
+
+    #panel {
+      position: absolute;
+      top: 80px;
+      right: 20px;
+      width: 300px;
+      min-width: 220px;
+      max-width: 520px;
+      background: rgba(10, 10, 15, .8);
+      border-radius: 8px;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+
+    #drag-handle {
+      cursor: move;
+      height: 12px;
+      margin: -10px -10px 6px -10px;
+      background: rgba(240, 178, 50, .18);
+      border-radius: 8px 8px 0 0;
+    }
+
+    #resize-handle {
+      position: absolute;
+      right: 3px;
+      bottom: 3px;
+      width: 14px;
+      height: 14px;
+      cursor: nwse-resize;
+      opacity: .35;
+      background:
+        linear-gradient(135deg, transparent 0 40%, #f0b232 40% 55%, transparent 55% 100%),
+        linear-gradient(135deg, transparent 0 65%, #f0b232 65% 80%, transparent 80% 100%);
+    }
+
+    h3 {
+      margin: 8px 0 4px;
+      font-size: 13px;
+      color: #f0b232;
+    }
+
+    h3.ally {
+      color: #5fb4ff;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      padding: 2px 0;
+    }
+
+    .row img,
+    .chip img {
+      height: 20px;
+      border-radius: 2px;
+    }
+
+    .row .pct {
+      margin-left: auto;
+    }
+
+    .good {
+      color: #6fdc6f;
+    }
+
+    .bad {
+      color: #ff6b6b;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      min-height: 22px;
+    }
+
+    .chip {
+      background: #2a2a35;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-size: 12px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    #hero-input {
+      width: 100%;
+      box-sizing: border-box;
+      display: none;
+      margin-top: 6px;
+      padding: 4px;
+      background: #1b1b24;
+      color: #fff;
+      border: 1px solid #f0b232;
+    }
+
+    #hero-input.ally-mode {
+      border-color: #5fb4ff;
+    }
+
+    #hint {
+      font-size: 11px;
+      opacity: .6;
+      margin-top: 4px;
+    }
+
+    .stats {
+      font-size: 12px;
+      opacity: .85;
+    }
+
+    #cache-status {
+      font-size: 10px;
+      opacity: .5;
+      margin-top: 6px;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="panel">
+    <div id="drag-handle" title="Arraste para mover (só funciona com F9/F10 ativo)"></div>
+
+    <div id="me" style="font-size:12px;opacity:.8"></div>
+
+    <h3>Inimigos</h3>
+    <div id="chips" class="chips"></div>
+
+    <h3 class="ally">Seu time</h3>
+    <div id="allychips" class="chips"></div>
+
+    <input id="hero-input" list="heroes" placeholder="Inimigo: nome + Enter">
+    <datalist id="heroes"></datalist>
+    <div id="hint">F10: digitar | Tab: alterna inimigo/aliado | Backspace: remove o último | F8: esconder</div>
+
+    <h3>Análise inimiga</h3>
+    <div id="analysis">-</div>
+
+    <h3>Itens sugeridos</h3>
+    <div id="items">-</div>
+
+    <h3>Alertas por herói</h3>
+    <div id="herotips">-</div>
+
+    <h3 class="ally">Análise do seu time</h3>
+    <div id="allyanalysis">-</div>
+
+    <h3>Melhores counters</h3>
+    <div id="counters">-</div>
+
+    <h3>Seu herói contra eles</h3>
+    <div id="mine">-</div>
+
+    <div id="cache-status"></div>
+    <div id="resize-handle" title="Arraste para redimensionar (só funciona com F9/F10 ativo)"></div>
+  </div>
+
+  <script>
+    const CDN = 'https://cdn.cloudflare.steamstatic.com';
+    let heroes = {};            // id -> {id, name, img, roles, attack}
+    let byName = {};            // nome minúsculo -> id
+    let enemies = [];
+    let allies = [];            // aliados (sem contar você, que vem do GSI)
+    let addingAlly = false;     // alvo atual da digitação
+    let myHeroId = null;
+    let matchId = null;
+    let renderSeq = 0;
+    const cache = {};           // cache em memória (promises), evita chamadas duplicadas na mesma sessão
+
+    // Tempo de validade do cache em disco antes de buscar de novo na API
+    const CACHE_TTL_MATCHUPS = 3 * 24 * 60 * 60 * 1000; // 3 dias
+    const CACHE_TTL_HEROES = 7 * 24 * 60 * 60 * 1000;   // 7 dias
+
+    const input = document.getElementById('hero-input');
+    const cacheStatusEl = document.getElementById('cache-status');
+    const panel = document.getElementById('panel');
+    const dragHandle = document.getElementById('drag-handle');
+    const resizeHandle = document.getElementById('resize-handle');
+
+    const aliases = {
+      am: 'anti-mage', sf: 'shadow fiend', pa: 'phantom assassin', ld: 'lone druid',
+      wk: 'wraith king', ss: 'shadow shaman', ww: 'winter wyvern', tb: 'terrorblade',
+      cm: 'crystal maiden', qop: 'queen of pain', np: "nature's prophet"
+    };
+
+    const INVIS = ['Riki', 'Clinkz', 'Bounty Hunter', 'Nyx Assassin', 'Weaver',
+      'Mirana', 'Invoker', 'Slark', 'Treant Protector'];
+
+    const EVASION = ['Phantom Assassin', 'Windranger', 'Juggernaut', 'Vengeful Spirit', 'Weaver'];
+
+    const HIGH_REGEN = ['Bristleback', 'Huskar', 'Wraith King', 'Alchemist', 'Timbersaw', 'Necrophos'];
+
+    // Alertas específicos por herói, independente da composição geral.
+    // Interações de "atravessa BKB" mudam de patch em patch — trate como guia,
+    // não como regra absoluta, e confira o tooltip da habilidade se tiver dúvida.
+    const HERO_TIPS = {
+      'Axe': { tip: "Berserker's Call força seu herói a atacar o Axe: BKB evita o efeito.", items: [['black_king_bar', 'BKB']] },
+      'Bloodseeker': { tip: 'Rupture pune quem se desloca com vida baixa: evite blink/dash fugindo ferido, e leve algo de save.', items: [['aeon_disk', 'Aeon Disk']] },
+      'Silencer': { tip: 'Global Silence afeta o mapa inteiro: evite ficar isolado quando ele tiver a ultimate pronta.', items: [] },
+      'Bane': { tip: "Nightmare e Fiend's Grip são perigosos em conjunto: tenha spell immunity pronta antes de entrar na luta.", items: [['black_king_bar', 'BKB']] },
+      'Doom': { tip: "A ultimate dele costuma atravessar BKB e desativa habilidades/itens ativos por um tempo: Linken's Sphere pode bloquear o cast inicial.", items: [['sphere', "Linken's Sphere"]] },
+      'Legion Commander': { tip: "Duel prende 1x1 e costuma ignorar BKB: tenha dano/vida suficiente para vencer, ou Linken's Sphere para bloquear o cast.", items: [['sphere', "Linken's Sphere"]] },
+      'Nyx Assassin': { tip: 'Fica invisível e aplica Mana Burn: leve Sentry/Dust e não gaste toda a mana perto dele.', items: [['sentry_ward', 'Sentry'], ['dust', 'Dust']] },
+      'Naga Siren': { tip: 'Song of the Siren desativa o time inteiro por alguns segundos, no mapa todo: evite forçar lutas sem saber a localização dela.', items: [] },
+      'Necrophos': { tip: "Reaper's Scythe causa mais dano quanto menor sua vida: não force lutas machucado perto dele.", items: [] },
+      'Lifestealer': { tip: 'Rage dá imunidade a magia por um tempo curto: guarde controle físico (Abyssal) para depois que passar.', items: [['abyssal_blade', 'Abyssal']] },
+      'Enigma': { tip: 'Black Hole é canalizado: interromper com stun físico ou sair do raio evita o pior do efeito.', items: [] },
+      'Anti-Mage': { tip: 'Mana Void pune quem gasta muita mana perto dele: cuidado com o consumo de mana em luta, e Force Staff ajuda a fugir do blink.', items: [['force_staff', 'Force Staff']] },
+      'Morphling': { tip: 'Ganha atributos rápido e troca stats via Morph: Diffusal e Nullifier dificultam ele escapar.', items: [['diffusal_blade', 'Diffusal Blade'], ['nullifier', 'Nullifier']] },
+      'Storm Spirit': { tip: 'Depende de mobilidade via mana: Orchid/Bloodthorn silenciam e impedem o escape.', items: [['orchid', 'Orchid'], ['bloodthorn', 'Bloodthorn']] },
+      'Void Spirit': { tip: 'Mobilidade alta com os portais: Orchid/Bloodthorn silenciam e impedem o combo de escape.', items: [['orchid', 'Orchid'], ['bloodthorn', 'Bloodthorn']] },
+      'Techies': { tip: 'Minas ficam invisíveis: ande em grupo com Sentry perto de áreas suspeitas, principalmente perto de runas e gargalos.', items: [['sentry_ward', 'Sentry']] },
+    };
+
+    const ITEM_CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images/items/';
+    const itemIcon = (file) => `<img src="${ITEM_CDN}${file}_lg.png" style="height:20px;border-radius:3px" onerror="this.style.display='none'">`;
+
+    // "text" é sempre FUNÇÃO que recebe stats — nunca string calculada fora de função
+    const ITEM_RULES = [
+      {
+        test: (s) => s.nukers >= 3,
+        text: () => 'Muito dano de habilidade',
+        items: [['consecrated_wraps', 'Consecrated Wraps'], ['pipe_of_insight', 'Pipe'], ['black_king_bar', 'BKB']]
+      },
+      {
+        test: (s) => s.disablers >= 3,
+        text: () => 'Muito controle',
+        items: [['black_king_bar', 'BKB'], ['manta', 'Manta'], ['lotus_orb', 'Lotus Orb']]
+      },
+      {
+        test: (s) => s.invis.length > 0,
+        text: (s) => `Heróis invisíveis (${s.invis.join(', ')})`,
+        items: [['dust', 'Dust'], ['sentry_ward', 'Sentry'], ['gem_of_true_sight', 'Gem']]
+      },
+      {
+        test: (s) => s.escapes >= 3,
+        text: () => 'Muitos escapes',
+        items: [['orchid', 'Orchid'], ['sheepstick', 'Hex'], ['abyssal_blade', 'Abyssal']]
+      },
+      {
+        test: (s) => s.evasion.length > 0,
+        text: (s) => `Evasão (${s.evasion.join(', ')})`,
+        items: [['monkey_king_bar', 'MKB']]
+      },
+      {
+        test: (s) => s.regen.length > 0,
+        text: (s) => `Regeneração alta (${s.regen.join(', ')})`,
+        items: [['spirit_vessel', 'Spirit Vessel'], ['nullifier', 'Nullifier']]
+      },
+      {
+        test: (s) => s.melee >= 4,
+        text: () => 'Time majoritariamente melee',
+        items: [['ghost_scepter', 'Ghost'], ['force_staff', 'Force Staff']]
+      }
+    ];
+
+    // Busca com cache em disco (via main.js). Se a rede falhar mas houver algo em
+    // disco (mesmo vencido), usa esse dado velho em vez de deixar a tela vazia.
+    async function cachedFetch(key, url, ttl) {
+      let cached = null;
+      try { cached = await window.api.cacheGet(key); } catch { }
+      if (cached && Date.now() - cached.timestamp < ttl) return cached.data;
+
+      try {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(r.status);
+        const data = await r.json();
+        window.api.cacheSet(key, data).catch(() => { });
+        return data;
+      } catch (e) {
+        if (cached) return cached.data; // rede falhou, mas tinha algo salvo: usa mesmo vencido
+        throw e;
+      }
+    }
+
+    async function loadHeroes() {
+      const list = await cachedFetch('heroes_list', 'https://api.opendota.com/api/heroes', CACHE_TTL_HEROES);
+      const heroStats = await cachedFetch('hero_stats', 'https://api.opendota.com/api/heroStats', CACHE_TTL_HEROES);
+      const imgs = Object.fromEntries(heroStats.map(h => [h.id, h.img]));
+      for (const h of list) {
+        heroes[h.id] = {
+          id: h.id,
+          name: h.localized_name,
+          img: imgs[h.id] ? CDN + imgs[h.id] : '',
+          roles: h.roles || [],
+          attack: h.attack_type   // "Melee" ou "Ranged"
+        };
+        byName[h.localized_name.toLowerCase()] = h.id;
+      }
+      document.getElementById('heroes').innerHTML =
+        list.map(h => `<option value="${h.localized_name}">`).join('');
+    }
+
+    // Cache de promises em memória: chamadas simultâneas ao mesmo herói reaproveitam
+    // a mesma chamada. Por baixo, cachedFetch cuida da persistência em disco.
+    function matchups(id) {
+      if (!cache[id]) {
+        cache[id] = cachedFetch(`matchups_${id}`, `https://api.opendota.com/api/heroes/${id}/matchups`, CACHE_TTL_MATCHUPS)
+          .then(d => Array.isArray(d) ? d : [])
+          .catch(() => { delete cache[id]; return []; });
+      }
+      return cache[id];
+    }
+
+    const icon = (id) => heroes[id]?.img
+      ? `<img src="${heroes[id].img}" onerror="this.style.display='none'">` : '';
+
+    const countRole = (ids, role) => ids.filter(id => heroes[id]?.roles.includes(role)).length;
+
+    // ---------- Análise do time inimigo ----------
+    function analyzeEnemies() {
+      const el = document.getElementById('analysis');
+      const itemsEl = document.getElementById('items');
+      const heroTipsEl = document.getElementById('herotips');
+      if (!enemies.length) { el.textContent = '-'; itemsEl.textContent = '-'; heroTipsEl.textContent = '-'; return; }
+
+      const stats = {
+        melee: enemies.filter(id => heroes[id]?.attack === 'Melee').length,
+        invis: enemies.filter(id => INVIS.includes(heroes[id]?.name)).map(id => heroes[id].name),
+        evasion: enemies.filter(id => EVASION.includes(heroes[id]?.name)).map(id => heroes[id].name),
+        regen: enemies.filter(id => HIGH_REGEN.includes(heroes[id]?.name)).map(id => heroes[id].name),
+        disablers: countRole(enemies, 'Disabler'),
+        nukers: countRole(enemies, 'Nuker'),
+        initiators: countRole(enemies, 'Initiator'),
+        escapes: countRole(enemies, 'Escape'),
+        pushers: countRole(enemies, 'Pusher')
+      };
+
+      const tips = [];
+      if (stats.disablers >= 3) tips.push('Muito controle: BKB, Manta, Linken ou Lotus');
+      if (stats.nukers >= 3) tips.push('Muito dano de habilidade: Pipe, Consecrated Wraps ou BKB');
+      if (stats.invis.length) tips.push(`Invisíveis (${stats.invis.join(', ')}): leve Dust, Sentry ou Gem`);
+      if (stats.escapes >= 3) tips.push('Muitos escapes: valorize controle instantâneo (Hex, Orchid)');
+      if (stats.initiators >= 3) tips.push('Muita iniciação: cuidado com posicionamento e smoke');
+      if (stats.pushers >= 3) tips.push('Time de push: guarde wave clear e defesa de torre');
+      if (stats.melee >= 4) tips.push('Maioria melee: kite e controle de área rendem');
+      if (enemies.length === 5 && stats.disablers === 0) tips.push('Quase sem controle: dá para jogar mais agressivo');
+
+      el.innerHTML =
+        `<div class="row stats">Controle ${stats.disablers} · Nuke ${stats.nukers} · Init ${stats.initiators} · Escape ${stats.escapes} · Push ${stats.pushers} · Melee ${stats.melee}/${enemies.length}</div>` +
+        (tips.length ? tips.map(t => `<div class="row">• ${t}</div>`).join('') : '<div class="row">Sem alertas</div>');
+
+      renderItems(stats);
+      renderHeroTips();
+    }
+
+    function renderItems(stats) {
+      const el = document.getElementById('items');
+      const active = ITEM_RULES.filter(r => r.test(stats));
+      el.innerHTML = active.length
+        ? active.map(r =>
+          `<div class="row" style="flex-direction:column;align-items:flex-start;gap:2px">
+           <span style="font-size:11px;opacity:.7">${r.text(stats)}</span>
+           <span>${r.items.map(([file, name]) => itemIcon(file) + ` ${name}`).join('&nbsp;&nbsp;')}</span>
+         </div>`).join('')
+        : '<div class="row">Sem alerta de item</div>';
+    }
+
+    function renderHeroTips() {
+      const el = document.getElementById('herotips');
+      const present = enemies.map(id => heroes[id]?.name).filter(name => HERO_TIPS[name]);
+      el.innerHTML = present.length
+        ? present.map(name => {
+          const t = HERO_TIPS[name];
+          const itemsHtml = t.items.length
+            ? `<span>${t.items.map(([file, label]) => itemIcon(file) + ` ${label}`).join('&nbsp;&nbsp;')}</span>`
+            : '';
+          return `<div class="row" style="flex-direction:column;align-items:flex-start;gap:2px">
+                  <span style="font-size:11px;opacity:.7"><b>${name}</b>: ${t.tip}</span>
+                  ${itemsHtml}
+                </div>`;
+        }).join('')
+        : '<div class="row">Nenhum herói com alerta específico</div>';
+    }
+
+    // ---------- Análise do seu time (aliados + você) ----------
+    function analyzeAllies() {
+      const el = document.getElementById('allyanalysis');
+      const team = [...allies];
+      if (myHeroId && !team.includes(myHeroId)) team.push(myHeroId);
+      if (team.length < 2) { el.textContent = 'Adicione seus aliados (Tab no modo F10)'; return; }
+
+      const complete = team.length === 5;
+      const pre = complete ? 'Seu time não tem' : 'Por enquanto sem';
+      const carries = countRole(team, 'Carry'), supports = countRole(team, 'Support');
+      const disablers = countRole(team, 'Disabler'), initiators = countRole(team, 'Initiator');
+      const durable = countRole(team, 'Durable'), escapes = countRole(team, 'Escape');
+      const nukers = countRole(team, 'Nuker');
+
+      const tips = [];
+      if (disablers === 0) tips.push(`${pre} controle (stun, silence, root)`);
+      if (initiators === 0) tips.push(`${pre} iniciação: cuidado ao forçar lutas`);
+      if (durable === 0) tips.push(`${pre} frontline (herói resistente)`);
+      if (supports === 0) tips.push(`${pre} suporte: atenção a wards e sustain`);
+      if (carries === 0) tips.push(`${pre} carry: o late game pode ser difícil`);
+      if (carries >= 3) tips.push('Muitos carries: falta quem abra espaço');
+      if (supports >= 3) tips.push('Muitos suportes: o farm vai ficar apertado');
+      if (nukers === 0 && complete) tips.push('Pouco dano de habilidade no time');
+
+      el.innerHTML =
+        `<div class="row stats">${team.length}/5 · Carry ${carries} · Sup ${supports} · Controle ${disablers} · Init ${initiators} · Tank ${durable} · Escape ${escapes}</div>` +
+        (tips.length ? tips.map(t => `<div class="row">• ${t}</div>`).join('') : '<div class="row">Composição equilibrada</div>');
+    }
+
+    async function render() {
+      const seq = ++renderSeq;
+
+      document.getElementById('me').textContent =
+        myHeroId ? `Seu herói: ${heroes[myHeroId]?.name ?? myHeroId}` : 'Aguardando partida...';
+
+      document.getElementById('chips').innerHTML =
+        enemies.map(id => `<span class="chip">${icon(id)}${heroes[id]?.name ?? id}</span>`).join('');
+      document.getElementById('allychips').innerHTML =
+        allies.map(id => `<span class="chip">${icon(id)}${heroes[id]?.name ?? id}</span>`).join('');
+
+      analyzeEnemies();
+      analyzeAllies();
+
+      if (!enemies.length) {
+        document.getElementById('counters').textContent = '-';
+        document.getElementById('mine').textContent = '-';
+        return;
+      }
+
+      // Melhores counters: quanto menor o winrate do inimigo contra o herói X, melhor X
+      // (heróis já escolhidos, inimigos ou aliados, ficam fora da sugestão)
+      const taken = new Set([...enemies, ...allies, myHeroId]);
+      const score = {};
+      for (const e of enemies) {
+        const list = await matchups(e);
+        if (seq !== renderSeq) return;   // chegou um render mais novo, descarta este
+        for (const m of list) {
+          if (m.games_played < 200 || taken.has(m.hero_id)) continue;
+          score[m.hero_id] = (score[m.hero_id] || 0) + (0.5 - m.wins / m.games_played);
+        }
+      }
+      const top = Object.entries(score).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      document.getElementById('counters').innerHTML = top.length
+        ? top.map(([id, s]) =>
+          `<div class="row">${icon(id)}<span>${heroes[id]?.name ?? id}</span>
+           <span class="pct good">+${(s * 100 / enemies.length).toFixed(1)}%</span></div>`).join('')
+        : 'sem dados';
+
+      // Seu herói contra cada inimigo (winrate do SEU herói no confronto)
+      if (myHeroId) {
+        const mine = await matchups(myHeroId);
+        if (seq !== renderSeq) return;
+        document.getElementById('mine').innerHTML = enemies.map(e => {
+          const m = mine.find(x => x.hero_id === e);
+          if (!m || m.games_played < 50) {
+            return `<div class="row">${icon(e)}<span>${heroes[e]?.name}</span><span class="pct">sem dados</span></div>`;
+          }
+          const wr = m.wins / m.games_played * 100;
+          return `<div class="row">${icon(e)}<span>${heroes[e]?.name}</span>
+                  <span class="pct ${wr >= 50 ? 'good' : 'bad'}">${wr.toFixed(1)}%</span></div>`;
+        }).join('');
+      } else {
+        document.getElementById('mine').textContent = '-';
+      }
+    }
+
+    function updateInputMode() {
+      input.classList.toggle('ally-mode', addingAlly);
+      input.placeholder = addingAlly
+        ? 'Aliado: nome + Enter (Tab troca)'
+        : 'Inimigo: nome + Enter (Tab troca)';
+    }
+
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Tab') {
+        ev.preventDefault();
+        addingAlly = !addingAlly;
+        updateInputMode();
+      } else if (ev.key === 'Enter') {
+        const typed = input.value.trim().toLowerCase();
+        input.value = '';
+        if (!typed) return;
+        const key = aliases[typed] ?? typed;
+        const id = byName[key] ?? Object.entries(byName).find(([n]) => n.startsWith(key))?.[1];
+        if (!id) return;
+        // um herói não pode estar em dois lugares (nem ser o seu)
+        if (enemies.includes(id) || allies.includes(id) || id === myHeroId) return;
+        if (addingAlly) {
+          if (allies.length < 4) { allies.push(id); render(); }
+        } else if (enemies.length < 5) {
+          enemies.push(id); render();
+        }
+      } else if (ev.key === 'Backspace' && !input.value) {
+        (addingAlly ? allies : enemies).pop();
+        render();
+      }
+    });
+
+    window.api.onInputMode((on) => {
+      input.style.display = on ? 'block' : 'none';
+      if (on) { updateInputMode(); input.focus(); }
+    });
+
+    // O GSI manda vários pacotes por segundo: só renderiza quando algo relevante mudou
+    window.api.onGsi((data) => {
+      let changed = false;
+      const newMatch = data.map?.matchid;
+      if (newMatch && newMatch !== matchId) {
+        matchId = newMatch;
+        enemies = [];
+        allies = [];
+        myHeroId = null;
+        changed = true;
+      }
+      if (data.hero?.id && data.hero.id !== myHeroId) {
+        myHeroId = data.hero.id;
+        changed = true;
+      }
+      if (changed) render();
+    });
+
+    // ---------- Painel arrastável e redimensionável (só funciona com F9/F10 ativo,
+    // porque é o único momento em que a janela realmente recebe cliques do mouse) ----------
+    function savePanelLayout() {
+      try {
+        localStorage.setItem('panelLayout', JSON.stringify({
+          left: panel.offsetLeft,
+          top: panel.offsetTop,
+          width: panel.offsetWidth,
+        }));
+      } catch { }
+    }
+
+    (function initPanelLayout() {
+      let saved = null;
+      try { saved = JSON.parse(localStorage.getItem('panelLayout') || 'null'); } catch { }
+      if (saved) {
+        panel.style.left = saved.left + 'px';
+        panel.style.top = saved.top + 'px';
+        panel.style.width = saved.width + 'px';
+        panel.style.right = 'auto';
+      } else {
+        // Converte a posição inicial (top/right) para left/top, para não "pular"
+        // na primeira vez que o painel for arrastado.
+        const rect = panel.getBoundingClientRect();
+        panel.style.left = rect.left + 'px';
+        panel.style.right = 'auto';
+      }
+    })();
+
+    let dragging = null;
+    let resizing = null;
+
+    dragHandle.addEventListener('mousedown', (e) => {
+      dragging = { startX: e.clientX, startY: e.clientY, left: panel.offsetLeft, top: panel.offsetTop };
+      e.preventDefault();
+    });
+
+    resizeHandle.addEventListener('mousedown', (e) => {
+      resizing = { startX: e.clientX, width: panel.offsetWidth };
+      e.preventDefault();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (dragging) {
+        panel.style.left = (dragging.left + e.clientX - dragging.startX) + 'px';
+        panel.style.top = (dragging.top + e.clientY - dragging.startY) + 'px';
+      } else if (resizing) {
+        const w = Math.min(520, Math.max(220, resizing.width + e.clientX - resizing.startX));
+        panel.style.width = w + 'px';
+      }
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (dragging || resizing) savePanelLayout();
+      dragging = null;
+      resizing = null;
+    });
+
+    loadHeroes()
+      .then(() => { cacheStatusEl.textContent = ''; render(); })
+      .catch((e) => { cacheStatusEl.textContent = 'Sem dados de heróis (offline e sem cache ainda)'; console.error(e); });
+  </script>
+</body>
+
+</html>

@@ -1,0 +1,15 @@
+# Dependências
+node_modules/
+
+# Saída do electron-builder
+dist/
+
+# Arquivos de debug do GSI 
+gsi-*.json
+
+# Variáveis de ambiente / chaves, se algum dia usar
+.env
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db

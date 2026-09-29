@@ -1,0 +1,33 @@
+{
+  "name": "dota-overlay",
+  "version": "1.0.0",
+  "description": " Feito a fim de estudos ",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "keywords": [],
+  "author": "Luczeraaa",
+  "license": "ISC",
+  "type": "commonjs",
+  "build": {
+    "appId": "com.luczeraaa.dotaoverlay",
+    "productName": "Dota Overlay",
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "icon.ico"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^24.13.3"
+  }
+}
