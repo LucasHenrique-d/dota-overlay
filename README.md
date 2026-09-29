@@ -78,7 +78,7 @@ Abra o Dota 2 depois de rodar o comando. O overlay aparece transparente por cima
 
 | Tecla | Ação |
 |---|---|
-| **F9 / F10** | Liga/desliga o modo de digitação (confira qual está configurada no `main.js`) |
+| **F10** | Liga/desliga o modo de digitação (confira qual está configurada no `main.js`) |
 | **Tab** (com o modo de digitação ativo) | Alterna entre digitar inimigo ou aliado |
 | **Enter** | Confirma o herói digitado |
 | **Backspace** (campo vazio) | Remove o último herói adicionado à lista ativa |
